@@ -263,8 +263,8 @@ class LoadBalancerPluginDbv2(base_db.CommonDbMixin,
     def get_loadbalancers(self, context, filters=None):
         lb_dbs = self._get_resources(context, models.LoadBalancer,
                                      filters=filters)
-        return [data_models.LoadBalancer.from_sqlalchemy_model(lb_db)
-                for lb_db in lb_dbs]
+        #Don't convert to dataa model, its very expensive
+        return [lb_db for lb_db in lb_dbs]
 
     def get_loadbalancer(self, context, id):
         lb_db = self._get_resource(context, models.LoadBalancer, id)
