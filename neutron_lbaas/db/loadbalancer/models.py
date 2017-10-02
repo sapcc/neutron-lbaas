@@ -12,7 +12,8 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-
+from oslo_log import log as logging
+from time import time
 
 from neutron.api.v2 import attributes as attr
 from neutron.db import model_base
@@ -24,9 +25,15 @@ from sqlalchemy import orm
 
 from neutron_lbaas._i18n import _
 from neutron_lbaas.services.loadbalancer import constants as lb_const
+from neutron_lbaas.db.loadbalancer import model_ext
 
 
-class SessionPersistenceV2(model_base.BASEV2):
+LOG = logging.getLogger(__name__)
+
+
+
+
+class SessionPersistenceV2(model_base.BASEV2,model_ext.SessionPersistence):
 
     __tablename__ = "lbaas_sessionpersistences"
 
@@ -40,7 +47,7 @@ class SessionPersistenceV2(model_base.BASEV2):
     cookie_name = sa.Column(sa.String(1024), nullable=True)
 
 
-class LoadBalancerStatistics(model_base.BASEV2):
+class LoadBalancerStatistics(model_base.BASEV2,model_ext.LoadBalancerStatistics):
     """Represents load balancer statistics."""
 
     NAME = 'loadbalancer_stats'
@@ -67,7 +74,10 @@ class LoadBalancerStatistics(model_base.BASEV2):
         return value
 
 
-class MemberV2(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
+
+
+
+class MemberV2(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant,model_ext.Member):
     """Represents a v2 neutron load balancer member."""
 
     NAME = 'member'
@@ -94,7 +104,7 @@ class MemberV2(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
         return self.pool.loadbalancer
 
 
-class HealthMonitorV2(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
+class HealthMonitorV2(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant,model_ext.HealthMonitor):
     """Represents a v2 neutron load balancer healthmonitor."""
 
     NAME = 'healthmonitor'
@@ -119,7 +129,7 @@ class HealthMonitorV2(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
         return self.pool.loadbalancer
 
 
-class LoadBalancer(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
+class LoadBalancer(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant,model_ext.LoadBalancer):
     """Represents a v2 neutron load balancer."""
 
     NAME = 'loadbalancer'
@@ -141,11 +151,11 @@ class LoadBalancer(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
         uselist=False,
         backref=orm.backref("loadbalancer", uselist=False),
         cascade="all, delete-orphan",
-        lazy='joined')
+        lazy='subquery')
     provider = orm.relationship(
         st_db.ProviderResourceAssociation,
         uselist=False,
-        lazy="joined",
+        lazy="subquery",
         primaryjoin="LoadBalancer.id==ProviderResourceAssociation.resource_id",
         foreign_keys=[st_db.ProviderResourceAssociation.resource_id],
         # this is only for old API backwards compatibility because when a load
@@ -161,7 +171,10 @@ class LoadBalancer(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
         return self
 
 
-class PoolV2(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
+
+
+
+class PoolV2(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant,model_ext.Pool):
     """Represents a v2 neutron load balancer pool."""
 
     NAME = 'pool'
@@ -188,21 +201,21 @@ class PoolV2(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
     members = orm.relationship(MemberV2,
                                backref=orm.backref("pool", uselist=False),
                                cascade="all, delete-orphan",
-                               lazy='joined')
+                               lazy='subquery')
     healthmonitor = orm.relationship(
         HealthMonitorV2,
         backref=orm.backref("pool", uselist=False),
-        lazy='joined')
+        lazy='subquery')
     session_persistence = orm.relationship(
         SessionPersistenceV2,
         uselist=False,
         backref=orm.backref("pool", uselist=False),
         cascade="all, delete-orphan",
-        lazy='joined')
+        lazy='subquery')
     loadbalancer = orm.relationship(
         LoadBalancer, uselist=False,
         backref=orm.backref("pools", uselist=True),
-        lazy='joined')
+        lazy='subquery')
 
     @property
     def root_loadbalancer(self):
@@ -218,7 +231,7 @@ class PoolV2(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
             return None
 
 
-class SNI(model_base.BASEV2):
+class SNI(model_base.BASEV2,model_ext.SNI):
 
     """Many-to-many association between Listener and TLS container ids
     Making the SNI certificates list, ordered using the position
@@ -242,7 +255,7 @@ class SNI(model_base.BASEV2):
         return self.listener.loadbalancer
 
 
-class L7Rule(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
+class L7Rule(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant,model_ext.L7Rule):
     """Represents L7 Rule."""
 
     NAME = 'l7rule'
@@ -269,7 +282,7 @@ class L7Rule(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
         return self.policy.listener.loadbalancer
 
 
-class L7Policy(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
+class L7Policy(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant,model_ext.L7Policy):
     """Represents L7 Policy."""
 
     NAME = 'l7policy'
@@ -295,7 +308,7 @@ class L7Policy(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
     rules = orm.relationship(
         L7Rule,
         uselist=True,
-        lazy="joined",
+        lazy="subquery",
         primaryjoin="L7Policy.id==L7Rule.l7policy_id",
         foreign_keys=[L7Rule.l7policy_id],
         cascade="all, delete-orphan",
@@ -303,14 +316,14 @@ class L7Policy(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
     )
     redirect_pool = orm.relationship(
         PoolV2, backref=orm.backref("l7_policies", uselist=True),
-        lazy='joined')
+        lazy='subquery')
 
     @property
     def root_loadbalancer(self):
         return self.listener.loadbalancer
 
 
-class Listener(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
+class Listener(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant,model_ext.Listener):
     """Represents a v2 neutron listener."""
 
     NAME = 'listener'
@@ -337,7 +350,7 @@ class Listener(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
             SNI,
             backref=orm.backref("listener", uselist=False),
             uselist=True,
-            lazy="joined",
+            lazy="subquery",
             primaryjoin="Listener.id==SNI.listener_id",
             order_by='SNI.position',
             collection_class=orderinglist.ordering_list(
@@ -351,15 +364,15 @@ class Listener(model_base.BASEV2, models_v2.HasId, models_v2.HasTenant):
     provisioning_status = sa.Column(sa.String(16), nullable=False)
     operating_status = sa.Column(sa.String(16), nullable=False)
     default_pool = orm.relationship(
-        PoolV2, backref=orm.backref("listeners"), lazy='joined')
+        PoolV2, backref=orm.backref("listeners"), lazy='subquery')
     loadbalancer = orm.relationship(
         LoadBalancer,
         backref=orm.backref("listeners", uselist=True),
-        lazy='joined')
+        lazy='subquery')
     l7_policies = orm.relationship(
         L7Policy,
         uselist=True,
-        lazy="joined",
+        lazy="subquery",
         primaryjoin="Listener.id==L7Policy.listener_id",
         order_by="L7Policy.position",
         collection_class=orderinglist.ordering_list('position', count_from=1),
