@@ -596,6 +596,10 @@ class LoadBalancerPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2,
     def update_listener(self, context, id, listener):
         listener = listener.get('listener')
         curr_listener_db = self.db.get_listener(context, id)
+
+        if curr_listener_db is not None:
+            curr_listener_db = copy.deepcopy(curr_listener_db)
+
         default_pool_id = listener.get('default_pool_id')
         if default_pool_id:
             self._check_listener_pool_lb_match(

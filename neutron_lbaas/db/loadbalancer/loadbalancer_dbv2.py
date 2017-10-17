@@ -549,7 +549,7 @@ class LoadBalancerPluginDbv2(base_db.CommonDbMixin,
                         tls_containers_changed=False):
         self._convert_api_to_db(listener)
         with context.session.begin(subtransactions=True):
-            listener_db = self._get_resource(context, models.Listener, id)
+            listener_db = self._get_resource(context, models.Listener, id,for_update=True)
 
             if not listener.get('protocol'):
                 # User did not intend to change the protocol so we will just
