@@ -752,7 +752,7 @@ class LoadBalancerPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2):
         curr_listener_db = self.db.get_listener(context, id)
 
         if curr_listener_db is not None:
-            curr_listener_db = copy.deepcopy(curr_listener_db)
+            curr_listener_db = copy.copy(curr_listener_db)
 
         default_pool_id = listener.get('default_pool_id')
         if default_pool_id:
