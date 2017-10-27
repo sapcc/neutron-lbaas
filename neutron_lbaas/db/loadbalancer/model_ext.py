@@ -28,7 +28,11 @@ class BaseDataModel(object):
 
         ret = {}
         for attr in self.__dict__:
+            # skip if attribute should not be taken due to method arguments
             if attr.startswith('_') or not kwargs.get(attr, True):
+                continue
+            # skip if class had defined fields which should be serialized and attr is not in
+            if bool(self.fields) and attr not in self.fields:
                 continue
             if isinstance(getattr(self, attr), list):
                 ret[attr] = []
@@ -326,7 +330,8 @@ class TLSContainer(BaseDataModel):
 
 class L7Rule(BaseDataModel):
 
-
+    fields = ['id', 'tenant_id', 'admin_state_up', 'provisioning_status',
+              'compare_type', 'invert', 'key', 'l7policy_id', 'type', 'value']
 
     def attached_to_loadbalancer(self):
         return bool(self.policy.listener.loadbalancer)
@@ -352,8 +357,8 @@ class L7Policy(BaseDataModel):
 
     fields = ['id', 'tenant_id', 'name', 'description', 'listener_id',
               'action', 'redirect_pool_id', 'redirect_url', 'position',
-              'admin_state_up', 'provisioning_status', 'listener', 'rules',
-              'redirect_pool']
+              'admin_state_up', 'provisioning_status', 'rules',
+              'redirect_pool_id']
 
     def __init__(self, id=None, tenant_id=None, name=None, description=None,
                  listener_id=None, action=None, redirect_pool_id=None,
@@ -372,7 +377,6 @@ class L7Policy(BaseDataModel):
         self.position = position
         self.admin_state_up = admin_state_up
         self.provisioning_status = provisioning_status
-        self.listener = listener
         self.rules = rules or []
 
     def attached_to_loadbalancer(self):

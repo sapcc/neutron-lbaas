@@ -674,6 +674,7 @@ class LoadBalancerPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2):
                 validate_tls_container(container_ref)
 
         to_validate = []
+        sni_changed = False
         if not listener['default_tls_container_ref']:
             raise loadbalancerv2.TLSDefaultContainerNotSpecified()
         if not curr_listener:
@@ -689,17 +690,20 @@ class LoadBalancerPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2):
             if (curr_listener['default_tls_container_id'] !=
                     listener['default_tls_container_ref']):
                 to_validate.extend([listener['default_tls_container_ref']])
-
-            if ('sni_container_refs' in listener and
-                    [container['tls_container_id'] for container in (
+            # Check if sni has changes when sni in listeners are given
+            if 'sni_container_refs' in listener and bool(listener['sni_container_refs']):
+                if ([container['tls_container_id'] for container in (
                         curr_listener['sni_containers'])] !=
                     listener['sni_container_refs']):
-                to_validate.extend(listener['sni_container_refs'])
+                    to_validate.extend(listener['sni_container_refs'])
+            # Check if sni got deleted
+            elif 'sni_containers' in curr_listener and bool(curr_listener['sni_containers']):
+                sni_changed = True
 
         if len(to_validate) > 0:
             validate_tls_containers(to_validate)
 
-        return len(to_validate) > 0
+        return (len(to_validate) > 0 or sni_changed)
 
     def _check_pool_loadbalancer_match(self, context, pool_id, lb_id):
         lb = self.db.get_loadbalancer(context, lb_id)
