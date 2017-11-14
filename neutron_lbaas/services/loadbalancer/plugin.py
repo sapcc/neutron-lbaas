@@ -680,9 +680,9 @@ class LoadBalancerPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2):
         if not curr_listener:
             to_validate.extend([listener['default_tls_container_ref']])
             if 'sni_container_refs' in listener:
-                to_validate.extend(listener['sni_container_refs'])
+                to_validate.extend([listener['sni_container_refs']])
         elif curr_listener['provisioning_status'] == constants.ERROR:
-            to_validate.extend(curr_listener['default_tls_container_id'])
+            to_validate.extend([curr_listener['default_tls_container_id']])
             to_validate.extend([
                 container['tls_container_id'] for container in (
                     curr_listener['sni_containers'])])
