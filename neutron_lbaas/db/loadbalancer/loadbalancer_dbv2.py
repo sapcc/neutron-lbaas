@@ -400,9 +400,10 @@ class LoadBalancerPluginDbv2(base_db.CommonDbMixin,
                     sni_container_ids = listener.pop('sni_container_ids')
                 listener_db_entry = models.Listener(**listener)
                 for container_id in sni_container_ids:
-                    sni = models.SNI(listener_id=listener_db_entry.id,
-                                     tls_container_id=container_id)
-                    listener_db_entry.sni_containers.append(sni)
+                    if container_id != listener['default_tls_container_id']:
+                        sni = models.SNI(listener_id=listener_db_entry.id,
+                                         tls_container_id=container_id)
+                        listener_db_entry.sni_containers.append(sni)
                 context.session.add(listener_db_entry)
         except exception.DBDuplicateEntry:
             raise loadbalancerv2.LoadBalancerListenerProtocolPortExists(
@@ -426,9 +427,10 @@ class LoadBalancerPluginDbv2(base_db.CommonDbMixin,
             if tls_containers_changed:
                 listener_db.sni_containers = []
                 for container_id in listener['sni_container_ids']:
-                    sni = models.SNI(listener_id=id,
-                                     tls_container_id=container_id)
-                    listener_db.sni_containers.append(sni)
+                    if container_id != listener['default_tls_container_id']:
+                        sni = models.SNI(listener_id=id,
+                                         tls_container_id=container_id)
+                        listener_db.sni_containers.append(sni)
 
             listener_db.update(listener)
 
