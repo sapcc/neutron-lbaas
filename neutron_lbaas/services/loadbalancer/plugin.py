@@ -103,7 +103,7 @@ class LoadBalancerPlugin(ldb.LoadBalancerPluginDb,
         verify_lbaas_mutual_exclusion()
 
         ctx = ncontext.get_admin_context()
-        # stop service in case provider was removed, but resources were not
+        # ccloud: DON't stop service in case provider is missing. Log resources without provider
         self._check_orphan_pool_associations(ctx, self.drivers.keys())
 
     def _check_orphan_pool_associations(self, context, provider_names):
@@ -121,7 +121,8 @@ class LoadBalancerPlugin(ldb.LoadBalancerPluginDb,
             LOG.exception(_LE("Delete associated loadbalancer pools before "
                               "removing providers %s"),
                           list(lost_providers))
-            raise SystemExit(1)
+            # ccloud : disable exit in case no provider set
+            #raise SystemExit(1)
 
     def _get_driver_for_provider(self, provider):
         if provider in self.drivers:
@@ -441,7 +442,8 @@ class LoadBalancerPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2):
             msg = _LE("Delete associated load balancers before "
                       "removing providers %s") % list(lost_providers)
             LOG.error(msg)
-            raise SystemExit(1)
+            # ccloud: DON't stop service in case provider is missing. Log resources without provider
+            #raise SystemExit(1)
 
     def _get_driver_for_provider(self, provider):
         try:
