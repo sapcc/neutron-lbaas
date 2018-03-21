@@ -433,10 +433,12 @@ class LoadBalancerPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2):
         resources prior to removing providers from configuration.
         """
         loadbalancers = self.db.get_loadbalancers(context)
+        # ccloud : PENDING_CREATE lb's do not have an provider set yet. Those create runtime errors
+        # due to nil exception and neutron start crashes
         lost_providers = set(
             [lb.provider.provider_name
              for lb in loadbalancers
-             if lb.provider.provider_name not in provider_names])
+             if (lb.provider and lb.provider.provider_name not in provider_names)])
         # resources are left without provider - stop the service
         if lost_providers:
             msg = _LE("Delete associated load balancers before "
