@@ -30,6 +30,7 @@ tempest.log
 !/.mailmap
 !/.pylintrc
 !/.testr.conf
+*.iml
 
 # Files created by releasenotes build
 releasenotes/build
