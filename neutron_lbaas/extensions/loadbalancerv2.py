@@ -210,7 +210,7 @@ RESOURCE_ATTRIBUTE_MAP = {
         'loadbalancers': {'allow_post': False, 'allow_put': False,
                           'is_visible': True},
         'default_pool_id': {'allow_post': False, 'allow_put': False,
-                            'validate': {'type:uuid': None},
+                            'validate': {'type:uuid_or_none': None},
                             'is_visible': True},
         'default_tls_container_ref': {'allow_post': True,
                                       'allow_put': True,
