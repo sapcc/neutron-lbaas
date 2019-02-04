@@ -1275,7 +1275,11 @@ class LoadBalancerPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2,
     # neutron request pipeline calls these methods before the plugin methods
     # are ever called
     def get_members(self, context, filters=None, fields=None):
-        pass
+        if not filters:
+            filters = {}
+
+        return self.db.get_pool_members_as_api_dict(
+            context, filters=filters)
 
     def get_member(self, context, id, fields=None):
-        pass
+        return self.db.get_pool_member(context, id).to_api_dict()
