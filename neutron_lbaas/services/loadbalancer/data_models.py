@@ -42,26 +42,55 @@ class BaseDataModel(object):
     # implementation. That would require handling custom default values though.
     fields = []
 
-    def to_dict(self, **kwargs):
+    def to_dict(self, calling_classes=None, **kwargs):
+        calling_classes = calling_classes or []
         ret = {}
+
         for attr in self.__dict__:
+            # skip if attribute should not be taken due to method arguments
             if attr.startswith('_') or not kwargs.get(attr, True):
+                continue
+            # skip if class had defined fields which should be serialized and attr is not in
+            if self.fields and attr not in self.fields:
                 continue
             value = self.__dict__[attr]
             if isinstance(getattr(self, attr), list):
                 ret[attr] = []
                 for item in value:
-                    if isinstance(item, BaseDataModel):
-                        ret[attr].append(item.to_dict())
+                    if isinstance(item, BaseDataModel) and calling_classes.count(self.__class__) < 2 :
+                        ret[attr].append(item.to_dict(calling_classes=calling_classes + [self.__class__]))
                     else:
                         ret[attr] = item
-            elif isinstance(getattr(self, attr), BaseDataModel):
-                ret[attr] = value.to_dict()
-            elif six.PY2 and isinstance(value, six.text_type):
+            elif isinstance(getattr(self, attr), BaseDataModel) and calling_classes.count(self.__class__) < 2:
+                ret[attr] = value.to_dict(calling_classes=calling_classes + [self.__class__])
+            elif isinstance(value, unicode):
                 ret[attr.encode('utf8')] = value.encode('utf8')
             else:
                 ret[attr] = value
+
         return ret
+
+
+    # def to_dict(self, **kwargs):
+    #     ret = {}
+    #     for attr in self.__dict__:
+    #         if attr.startswith('_') or not kwargs.get(attr, True):
+    #             continue
+    #         value = self.__dict__[attr]
+    #         if isinstance(getattr(self, attr), list):
+    #             ret[attr] = []
+    #             for item in value:
+    #                 if isinstance(item, BaseDataModel):
+    #                     ret[attr].append(item.to_dict())
+    #                 else:
+    #                     ret[attr] = item
+    #         elif isinstance(getattr(self, attr), BaseDataModel):
+    #             ret[attr] = value.to_dict()
+    #         elif six.PY2 and isinstance(value, six.text_type):
+    #             ret[attr.encode('utf8')] = value.encode('utf8')
+    #         else:
+    #             ret[attr] = value
+    #     return ret
 
     def to_api_dict(self, **kwargs):
         return {}
