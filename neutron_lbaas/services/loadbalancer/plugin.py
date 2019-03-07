@@ -638,9 +638,8 @@ class LoadBalancerPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2,
 
         driver = self._get_driver_for_loadbalancer(
             context, listener_db.loadbalancer_id)
-        LOG.info("wtn001: %s" % listener_db.to_api_dict())
+        # ccloud: try to avoid poll/listener caching issue. seems not to help
         listener_db = self.db.get_listener(context, id)
-        LOG.info("wtn002: %s" % listener_db.to_api_dict())
 
         self._call_driver_operation(
             context,
