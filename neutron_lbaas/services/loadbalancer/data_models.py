@@ -479,6 +479,7 @@ class Pool(BaseDataModel):
 
     @classmethod
     def from_dict(cls, model_dict):
+        default_pool = model_dict.pop('default_pool', None)
         healthmonitor = model_dict.pop('healthmonitor', None)
         session_persistence = model_dict.pop('session_persistence', None)
         model_dict.pop('sessionpersistence', None)
@@ -493,6 +494,8 @@ class Pool(BaseDataModel):
         model_dict['l7_policies'] = [L7Policy.from_dict(policy)
                                      for policy in l7_policies]
 
+        if default_pool:
+            model_dict['default_pool'] = Pool.from_dict(default_pool)
         if healthmonitor:
             model_dict['healthmonitor'] = HealthMonitor.from_dict(
                 healthmonitor)
