@@ -500,7 +500,7 @@ class Listener(model_base.BASEV2, model_base.HasId, model_base.HasProject):
     provisioning_status = sa.Column(sa.String(16), nullable=False)
     operating_status = sa.Column(sa.String(16), nullable=False)
     default_pool = orm.relationship(
-        PoolV2, backref=orm.backref("listeners"), lazy="immediate")
+        PoolV2, backref=orm.backref("listeners"), lazy="joined")
     loadbalancer = orm.relationship(
         LoadBalancer,
         backref=orm.backref("listeners", uselist=True))
