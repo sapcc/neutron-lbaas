@@ -15,7 +15,6 @@
 
 from neutron.db.models import servicetype as st_db
 from oslo_log import log as logging
-from time import time
 
 from neutron.db import models_v2
 from neutron_lib.db import constants as db_const
@@ -75,7 +74,7 @@ class LoadBalancerStatistics(model_base.BASEV2,model_ext.LoadBalancerStatistics)
         return value
 
 
-class MemberV2(model_base.BASEV2, models_v2.HasId, models_v2.HasProject,
+class MemberV2(model_base.BASEV2, model_base.HasId, model_base.HasProject,
                model_ext.Member):
     """Represents a v2 neutron load balancer member."""
 
@@ -103,7 +102,7 @@ class MemberV2(model_base.BASEV2, models_v2.HasId, models_v2.HasProject,
         return self.pool.loadbalancer
 
 
-class HealthMonitorV2(model_base.BASEV2, models_v2.HasId, models_v2.HasProject,
+class HealthMonitorV2(model_base.BASEV2, model_base.HasId, model_base.HasProject,
                       model_ext.HealthMonitor):
     """Represents a v2 neutron load balancer healthmonitor."""
 
@@ -130,7 +129,7 @@ class HealthMonitorV2(model_base.BASEV2, models_v2.HasId, models_v2.HasProject,
         return self.pool.loadbalancer
 
 
-class LoadBalancer(model_base.BASEV2, models_v2.HasId, models_v2.HasProject,
+class LoadBalancer(model_base.BASEV2, model_base.HasId, model_base.HasProject,
                    model_ext.LoadBalancer):
     """Represents a v2 neutron load balancer."""
 
@@ -254,7 +253,7 @@ class SNI(model_base.BASEV2, model_ext.SNI):
         return self.listener.loadbalancer
 
 
-class L7Rule(model_base.BASEV2, models_v2.HasId, models_v2.HasProject,
+class L7Rule(model_base.BASEV2, model_base.HasId, model_base.HasProject,
              model_ext.L7Rule):
     """Represents L7 Rule."""
 
@@ -282,7 +281,7 @@ class L7Rule(model_base.BASEV2, models_v2.HasId, models_v2.HasProject,
         return self.policy.listener.loadbalancer
 
 
-class L7Policy(model_base.BASEV2, models_v2.HasId, models_v2.HasProject,
+class L7Policy(model_base.BASEV2, model_base.HasId, model_base.HasProject,
                model_ext.L7Policy):
     """Represents L7 Policy."""
 
@@ -324,7 +323,7 @@ class L7Policy(model_base.BASEV2, models_v2.HasId, models_v2.HasProject,
         return self.listener.loadbalancer
 
 
-class Listener(model_base.BASEV2, models_v2.HasId, models_v2.HasProject,
+class Listener(model_base.BASEV2, model_base.HasId, model_base.HasProject,
                model_ext.Listener):
     """Represents a v2 neutron listener."""
 
