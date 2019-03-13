@@ -423,7 +423,6 @@ class L7Policy(model_base.BASEV2, model_base.HasId, model_base.HasProject):
     rules = orm.relationship(
         L7Rule,
         uselist=True,
-        lazy="joined",
         primaryjoin="L7Policy.id==L7Rule.l7policy_id",
         foreign_keys=[L7Rule.l7policy_id],
         cascade="all, delete-orphan",
@@ -500,14 +499,13 @@ class Listener(model_base.BASEV2, model_base.HasId, model_base.HasProject):
     provisioning_status = sa.Column(sa.String(16), nullable=False)
     operating_status = sa.Column(sa.String(16), nullable=False)
     default_pool = orm.relationship(
-        PoolV2, backref=orm.backref("listeners"), lazy="joined")
+        PoolV2, backref=orm.backref("listeners"))
     loadbalancer = orm.relationship(
         LoadBalancer,
         backref=orm.backref("listeners", uselist=True))
     l7_policies = orm.relationship(
         L7Policy,
         uselist=True,
-        lazy="joined",
         primaryjoin="Listener.id==L7Policy.listener_id",
         order_by="L7Policy.position",
         collection_class=orderinglist.ordering_list('position', count_from=1),
