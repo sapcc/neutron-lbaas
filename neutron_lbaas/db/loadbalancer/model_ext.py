@@ -34,6 +34,8 @@ class BaseDataModel(object):
             # skip if class had defined fields which should be serialized and attr is not in
             if bool(self.fields) and attr not in self.fields:
                 continue
+            if attr == 'project_id':
+                ret['tenant_id'] = self.__dict__[attr]
             if isinstance(getattr(self, attr), list):
                 ret[attr] = []
                 for item in self.__dict__[attr]:
