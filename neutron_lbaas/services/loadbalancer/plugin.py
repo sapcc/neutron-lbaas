@@ -1291,8 +1291,8 @@ class LoadBalancerPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2,
         if not filters:
             filters = {}
 
-        return self.db.get_pool_members_as_api_dict(
-            context, filters=filters)
+        members = self.db.get_pool_members(context, filters=filters)
+        return [member.to_api_dict() for member in members]
 
     def get_member(self, context, id, fields=None):
         return self.db.get_pool_member(context, id).to_api_dict()
