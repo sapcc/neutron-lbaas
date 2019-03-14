@@ -31,11 +31,12 @@ class BaseDataModel(object):
             # skip if attribute should not be taken due to method arguments
             if attr.startswith('_') or not kwargs.get(attr, True):
                 continue
+            # always add tenant_id, otherwise will break policy engine
+            if attr == 'project_id':
+                ret['tenant_id'] = self.__dict__[attr]
             # skip if class had defined fields which should be serialized and attr is not in
             if bool(self.fields) and attr not in self.fields:
                 continue
-            if attr == 'project_id':
-                ret['tenant_id'] = self.__dict__[attr]
             if isinstance(getattr(self, attr), list):
                 ret[attr] = []
                 for item in self.__dict__[attr]:
