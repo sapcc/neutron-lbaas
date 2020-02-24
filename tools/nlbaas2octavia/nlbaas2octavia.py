@@ -149,7 +149,7 @@ def process_health_monitor(LOG, n_session, o_session, project_id,
         ":operating_status);",
         {'id': hm_id, 'project_id': project_id, 'pool_id': pool_id,
          'type': hm[0], 'delay': hm[1], 'timeout': hm[2],
-         'fall_threshold': hm[10], 'rise_threshold': hm[3],
+         'fall_threshold': hm[10] if hm[10] else 3, 'rise_threshold': hm[3],
          'http_method': hm[4], 'url_path': hm[5], 'expected_codes': hm[6],
          'enabled': hm[7], 'provisioning_status': hm[8], 'name': hm[9],
          'operating_status': hm_op_status,
@@ -328,12 +328,27 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
             "ON a.id = b.resource_id WHERE ID = :id;",
             {'id': lb_id}).fetchone()
 
+        # F5 lbaas specifics
+        if not n_lb[0] == 'f5networks':
+            raise Exception(_('Skipping {}, wrong provider {}'.format(
+                lb_id, n_lb[0]
+            )))
+
         # Migrate the port and security groups to Octavia
         vip_port = n_session.execute(
             "SELECT a.device_owner, a.project_id, b.security_group_id "
             "FROM ports a JOIN securitygroupportbindings b ON "
             "a.id = b.port_id  where id = :id;",
             {'id': n_lb[7]}).fetchone()
+
+        # F5 lbaas specifics
+        if vip_port[0] == 'network:f5lbaasv2':
+            result = n_session.execute(
+                "UPDATE ports SET device_owner = 'network:f5listener' WHERE "
+                "id = :id;", {'id': n_lb[7]})
+            if result.rowcount != 1:
+                raise Exception(_('Unable to update VIP port in the neutron '
+                                'database.'))
 
         # neutron-lbaas does not support user VIP ports, so take
         # ownership of the port and security group
@@ -377,7 +392,7 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                  'operating_status': n_lb[5], 'enabled': n_lb[4],
                  'created_at': datetime.datetime.utcnow(),
                  'updated_at': datetime.datetime.utcnow(),
-                 'provider': n_lb[0]})
+                 'provider': 'f5'})
             if result.rowcount != 1:
                 raise Exception(_('Unable to create load balancer in the '
                                 'Octavia database.'))
@@ -447,6 +462,9 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                 "SELECT bytes_in, bytes_out, active_connections, "
                 "total_connections FROM lbaas_loadbalancer_statistics WHERE "
                 "loadbalancer_id = :lb_id;", {'lb_id': lb_id}).fetchone()
+            # Handle missing loadblaancer statistics
+            if not lb_stats:
+                lb_stats = (0, 0, 0, 0)
             listeners = n_session.execute(
                 "SELECT id, name, description, protocol, protocol_port, "
                 "connection_limit, default_pool_id, admin_state_up, "
