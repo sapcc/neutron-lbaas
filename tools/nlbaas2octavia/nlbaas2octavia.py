@@ -13,12 +13,15 @@
 #    under the License.
 
 import datetime
+import re
 import sys
 
+from icontrol import exceptions
 from oslo_config import cfg
 from oslo_db.sqlalchemy import enginefacade
 import oslo_i18n as i18n
 from oslo_log import log as logging
+from f5.bigip import ManagementRoot
 
 _translators = i18n.TranslatorFactory(domain='nlbaas2octavia')
 
@@ -28,12 +31,16 @@ _ = _translators.primary
 CONF = cfg.CONF
 
 cli_opts = [
+    cfg.StrOpt('cleanup_vcmp_guest', help='Cleanup the BigIP guest if status == passive/offline'),
+    cfg.StrOpt('cleanup_vcmp_host', help='Cleanup the BigIP host vlans of the vcmp_guest'),
     cfg.BoolOpt('all', default=False,
                 help='Migrate all load balancers'),
     cfg.StrOpt('lb_id',
                help='Load balancer ID to migrate'),
     cfg.StrOpt('project_id',
                help='Migrate all load balancers owned by this project'),
+    cfg.StrOpt('agent_id',
+               help='Migrate all load balancers hosted on this agent'),
 ]
 
 migration_opts = [
@@ -50,10 +57,95 @@ migration_opts = [
     cfg.StrOpt('octavia_db_connection',
                required=True,
                help='The octavia database connection string'),
+    cfg.StrOpt('bigip_password',
+               required=True,
+               help='The bigip password'),
 ]
 
 cfg.CONF.register_cli_opts(cli_opts)
 cfg.CONF.register_opts(migration_opts, group='migration')
+
+
+def get_device_name(bigip):
+    devices = bigip.tm.cm.devices.get_collection()
+    for device in devices:
+        if device.selfDevice == 'true':
+            return device.name
+
+    return None
+
+
+def cleanup_vcmp(bigip, vcmp_guest):
+    guest = bigip.tm.vcmp.guests.guest.load(name=vcmp_guest)
+    vlans = [vlan for vlan in guest.vlans]
+    for vlan_name in guest.vlans:
+        vlan = bigip.mgmt.tm.net.vlans.vlan.load(vlan_name)
+        if not vlan.name.startswith('net-') and not vlan.name.startswith('cc-'):
+            vlan.delete()
+            vlans.remove(vlan_name)
+
+    guest.vlans = vlans
+    guest.update()
+
+
+def cleanup_bigip(bigip):
+    act = bigip.tm.cm.devices.device.load(
+        name=get_device_name(bigip), partition='Common')
+    active = act.failoverState.lower() == 'active'
+
+    if active:
+        raise Exception(_('BigIP is active, aborting cleanup'))
+
+    ltm_types = [
+        bigip.tm.ltm.virtuals,
+        bigip.tm.ltm.virtual_address_s,
+        bigip.tm.ltm.policys,
+        bigip.tm.ltm.pools,
+        bigip.tm.ltm.monitor.https,
+        bigip.tm.ltm.monitor.https_s,
+        bigip.tm.ltm.monitor.tcps,
+        bigip.tm.ltm.monitor.gateway_icmps,
+        bigip.tm.ltm.nodes,
+        bigip.tm.ltm.snats,
+        bigip.tm.ltm.snatpools,
+        bigip.tm.ltm.snat_translations,
+        bigip.tm.ltm.persistence.universals,
+        bigip.tm.ltm.rules
+    ]
+    for ltm_type in ltm_types:
+        [r.delete() for r in ltm_type.get_collection()
+         if r.partition != 'Common']
+
+    net_types = [
+        bigip.tm.net.arps,
+        bigip.tm.net.selfips,
+        bigip.tm.net.vlans,
+        bigip.tm.net.route_domains
+    ]
+    try:
+        for net_type in net_types:
+            [r.delete() for r in net_type.get_collection()]
+    except exceptions.iControlUnexpectedHTTPError:
+        pass
+
+    for folder in bigip.tm.sys.folders.get_collection():
+        if folder.name != '/' and folder.name != 'Common' and getattr(folder, 'partition', '') != 'Common':
+            folder.delete()
+
+    for route in bigip.tm.net.routes.get_collection():
+        route.delete()
+
+    for selfip in bigip.tm.net.selfips.get_collection():
+        if not selfip.name.startswith('cc'):
+            selfip.delete()
+
+    for route_domain in bigip.tm.net.route_domains.get_collection():
+        if route_domain.id != 0:
+            route_domain.delete()
+
+    for vlan in bigip.tm.net.vlans.get_collection():
+        if not vlan.name.startswith('cc'):
+            vlan.delete()
 
 
 def cascade_delete_neutron_lb(n_session, lb_id):
@@ -107,7 +199,7 @@ def cascade_delete_neutron_lb(n_session, lb_id):
                                        "WHERE id = :id", {'id': pool[1]})
             if result.rowcount != 1:
                 raise Exception(_('Failed to delete health monitor: '
-                                '%s') % pool[1])
+                                  '%s') % pool[1])
     # Delete the lb stats
     n_session.execute(
         "DELETE FROM lbaas_loadbalancer_statistics WHERE "
@@ -134,7 +226,7 @@ def process_health_monitor(LOG, n_session, o_session, project_id,
 
     if hm is None:
         raise Exception(_('Health monitor %s has invalid '
-                        'provisioning_status.'), hm_id)
+                          'provisioning_status.'), hm_id)
 
     hm_op_status = 'ONLINE' if hm[7] else 'OFFLINE'
 
@@ -157,7 +249,7 @@ def process_health_monitor(LOG, n_session, o_session, project_id,
          'updated_at': datetime.datetime.utcnow()})
     if result.rowcount != 1:
         raise Exception(_('Unable to create health monitor in the Octavia '
-                        'database.'))
+                          'database.'))
 
 
 def process_session_persistence(n_session, o_session, pool_id):
@@ -172,7 +264,7 @@ def process_session_persistence(n_session, o_session, pool_id):
             {'pool_id': pool_id, 'type': sp[0], 'cookie_name': sp[1]})
         if result.rowcount != 1:
             raise Exception(_('Unable to create session persistence in the '
-                            'Octavia database.'))
+                              'Octavia database.'))
 
 
 def process_members(LOG, n_session, o_session, project_id, pool_id):
@@ -225,7 +317,7 @@ def process_SNI(n_session, o_session, listener_id):
              'position': SNI[1]})
         if result.rowcount != 1:
             raise Exception(_('Unable to create SNI record in the Octavia '
-                            'database.'))
+                              'database.'))
 
 
 def process_L7policies(LOG, n_session, o_session, listener_id, project_id):
@@ -265,13 +357,14 @@ def process_L7policies(LOG, n_session, o_session, listener_id, project_id):
              'project_id': project_id, 'operating_status': L7p_op_status})
         if result.rowcount != 1:
             raise Exception(_('Unable to create L7 policy in the Octavia '
-                            'database.'))
+                              'database.'))
         # Handle L7 rules
-        l7rules = n_session.execute(
-            "SELECT id, type, compare_type, invert, `key`, value, "
-            "provisioning_status, admin_state_up FROM lbaas_l7rules WHERE "
-            "l7policy_id = :l7policy_id AND provisioning_status = 'ACTIVE';",
-            {'l7policy_id': l7policy[0]}).fetchall()
+        if n_session.bind.name == 'postgresql':
+            query = "SELECT id, type, compare_type, invert, key, value, provisioning_status, admin_state_up FROM lbaas_l7rules WHERE l7policy_id = :l7policy_id AND provisioning_status = 'ACTIVE';"
+        else:
+            query = "SELECT id, type, compare_type, invert, `key`, value, provisioning_status, admin_state_up FROM lbaas_l7rules WHERE l7policy_id = :l7policy_id AND provisioning_status = 'ACTIVE';"
+        l7rules = n_session.execute(query,
+                                    {'l7policy_id': l7policy[0]}).fetchall()
         for l7rule in l7rules:
             LOG.debug('Migrating L7 rule: %s', l7policy[0])
 
@@ -300,11 +393,10 @@ def process_L7policies(LOG, n_session, o_session, listener_id, project_id):
                  'operating_status': L7r_op_status})
             if result.rowcount != 1:
                 raise Exception(_('Unable to create L7 policy in the Octavia '
-                                'database.'))
+                                  'database.'))
 
 
 def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
-
     n_session = n_session_maker(autocommit=False)
     o_session = o_session_maker(autocommit=False)
 
@@ -317,7 +409,7 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
             "provisioning_status = 'ACTIVE';", {'id': lb_id})
         if result.rowcount != 1:
             raise Exception(_('Load balancer is not provisioning_status '
-                            'ACTIVE'))
+                              'ACTIVE'))
 
         # Get the load balancer record from neutron
         n_lb = n_session.execute(
@@ -336,8 +428,8 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
 
         # Migrate the port and security groups to Octavia
         vip_port = n_session.execute(
-            "SELECT a.device_owner, a.project_id, b.security_group_id "
-            "FROM ports a JOIN securitygroupportbindings b ON "
+            "SELECT a.device_owner, a.project_id, b.host "
+            "FROM ports a JOIN ml2_port_bindings b ON "
             "a.id = b.port_id  where id = :id;",
             {'id': n_lb[7]}).fetchone()
 
@@ -348,33 +440,47 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                 "id = :id;", {'id': n_lb[7]})
             if result.rowcount != 1:
                 raise Exception(_('Unable to update VIP port in the neutron '
-                                'database.'))
+                                  'database.'))
 
-        # neutron-lbaas does not support user VIP ports, so take
-        # ownership of the port and security group
-        if vip_port[0] == 'neutron:LOADBALANCERV2':
-            result = n_session.execute(
-                "UPDATE ports SET device_owner = 'Octavia', "
-                "project_id = :proj_id WHERE "
-                "id = :id;", {'id': n_lb[7],
-                              'proj_id': CONF.migration.octavia_account_id})
-            if result.rowcount != 1:
-                raise Exception(_('Unable to update VIP port in the neutron '
-                                'database.'))
-            security_group = n_session.execute(
-                "SELECT project_id FROM securitygroups WHERE id = :id",
-                {'id': vip_port[2]}).fetchone()
+            selfip_ports = n_session.execute(
+                "SELECT a.id, a.device_owner, a.project_id, b.host, "
+                "a.device_id, a.name, a.standard_attr_id FROM ports a JOIN ml2_port_bindings b ON "
+                "a.id = b.port_id  WHERE device_id = :device_id AND "
+                "host = :host AND device_owner = 'network:f5lbaasv2';",
+                {'device_id': n_lb[8], 'host': vip_port[2]}).fetchall()
 
-            # Update security group project, only when its owner is not the
-            # user project, which means that Octavia should own it
-            if security_group[0] != n_lb[1]:
-                result = n_session.execute(
-                    "UPDATE securitygroups SET project_id = :proj_id WHERE "
-                    "id = :id;", {'proj_id': CONF.migration.octavia_account_id,
-                                  'id': vip_port[2]})
-                if result.rowcount != 1:
-                    raise Exception(_('Unable to update VIP security group in '
-                                      'the neutron database.'))
+            LOG.info("Found %d selfips", len(selfip_ports))
+
+            for selfip in selfip_ports:
+                p = re.compile('local-(.*)-{}'.format(n_lb[8]), re.IGNORECASE)
+                match = p.match(selfip[5])
+                if match:
+                    bigip = ManagementRoot(match.group(1), "admin", CONF.migration.bigip_password)
+
+                    act = bigip.tm.cm.devices.device.load(
+                        name=get_device_name(bigip), partition='Common')
+                    active = act.failoverState.lower() == 'active'
+
+                    # Only migrate passive selfips
+                    if not active:
+                        LOG.info("Migrating selfip of passive device {}: {}".format(
+                            match.group(1), act.failoverState.lower()))
+                        result = n_session.execute(
+                            "UPDATE ports SET device_owner = 'network:f5selfip', "
+                            "device_id = :dev_id, project_id = :proj_id WHERE "
+                            "id = :id;", {'id': selfip[0],
+                                          'dev_id': n_lb[7],
+                                          'proj_id': CONF.migration.octavia_account_id})
+                        if result.rowcount != 1:
+                            raise Exception(_('Unable to update SELFIP port in the neutron '
+                                              'database.'))
+                        result = n_session.execute(
+                            "UPDATE standardattributes SET description = :desc "
+                            "WHERE id = :id;", {'id': selfip[6],
+                                                'desc': match.group(1)})
+                        if result.rowcount != 1:
+                            raise Exception(_('Unable to update SELFIP port in the neutron '
+                                              'database.'))
 
         # Octavia driver load balancers are now done, next process the other
         # provider driver load balancers
@@ -388,14 +494,14 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                 ":operating_status, :enabled, :created_at, :updated_at, "
                 ":provider);",
                 {'id': lb_id, 'project_id': n_lb[1], 'name': n_lb[2],
-                 'description': n_lb[3], 'provisioning_status': 'ACTIVE',
+                 'description': n_lb[3], 'provisioning_status': 'PENDING_UPDATE',
                  'operating_status': n_lb[5], 'enabled': n_lb[4],
                  'created_at': datetime.datetime.utcnow(),
                  'updated_at': datetime.datetime.utcnow(),
                  'provider': 'f5'})
             if result.rowcount != 1:
                 raise Exception(_('Unable to create load balancer in the '
-                                'Octavia database.'))
+                                  'Octavia database.'))
 
             # Get the network ID for the VIP
             subnet = n_session.execute(
@@ -411,7 +517,7 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                  'subnet_id': n_lb[8], 'network_id': subnet[0]})
             if result.rowcount != 1:
                 raise Exception(_('Unable to create VIP in the Octavia '
-                                'database.'))
+                                  'database.'))
 
             # Create pools
             pools = n_session.execute(
@@ -445,7 +551,7 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                      'provisioning_status': pool[7]})
                 if result.rowcount != 1:
                     raise Exception(_('Unable to create pool in the '
-                                    'Octavia database.'))
+                                      'Octavia database.'))
 
                 # Create health monitor if there is one
                 if pool[5] is not None:
@@ -504,7 +610,7 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                      'updated_at': datetime.datetime.utcnow()})
                 if result.rowcount != 1:
                     raise Exception(_('Unable to create listener in the '
-                                    'Octavia database.'))
+                                      'Octavia database.'))
 
                 # Convert load balancer stats to listener stats
                 # This conversion may error on the low side due to
@@ -523,7 +629,7 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                      'amphora_id': listener[0], 'request_errors': 0})
                 if result.rowcount != 1:
                     raise Exception(_('Unable to create listener statistics '
-                                    'in the Octavia database.'))
+                                      'in the Octavia database.'))
 
                 # Handle SNI certs
                 process_SNI(n_session, o_session, listener[0])
@@ -534,7 +640,7 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
 
         # Delete the old neutron-lbaas records
         if (CONF.migration.delete_after_migration and not
-                CONF.migration.trial_run):
+        CONF.migration.trial_run):
             cascade_delete_neutron_lb(n_session, lb_id)
 
         if CONF.migration.trial_run:
@@ -568,13 +674,25 @@ def main():
     LOG = logging.getLogger('nlbaas2octavia')
     CONF.log_opt_values(LOG, logging.DEBUG)
 
-    if not CONF.all and not CONF.lb_id and not CONF.project_id:
-        print('Error: One of --all, --lb_id, --project_id must be specified.')
+    if (CONF.cleanup_vcmp_guest and not CONF.cleanup_vcmp_host) or (
+            not CONF.cleanup_vcmp_guest and CONF.cleanup_vcmp_host):
+        print('Error: both --cleanup_vcmp_guest and --cleanup_vcmp_host must be specified.')
+        return 1
+
+    if CONF.cleanup_vcmp_guest and CONF.cleanup_vcmp_host:
+        guest = ManagementRoot(CONF.cleanup_vcmp_guest, "admin", CONF.migration.bigip_password)
+        vcmp = ManagementRoot(CONF.cleanup_vcmp_host, "admin", CONF.migration.bigip_password)
+        cleanup_bigip(guest)
+        cleanup_vcmp(vcmp, CONF.cleanup_vcmp_guest)
+        return 0
+
+    if not CONF.all and not CONF.lb_id and not CONF.project_id and not CONF.agent_id:
+        print('Error: One of --all, --lb_id, --project_id, --agent_id must be specified.')
         return 1
 
     if ((CONF.all and (CONF.lb_id or CONF.project_id)) or
             (CONF.lb_id and CONF.project_id)):
-        print('Error: Only one of --all, --lb_id, --project_id allowed.')
+        print('Error: Only one of --all, --lb_id, --project_id, --agent_id allowed.')
         return 1
 
     neutron_context_manager = enginefacade.transaction_context()
@@ -596,12 +714,17 @@ def main():
         lb_id_list = [[CONF.lb_id]]
     elif CONF.project_id:
         lb_id_list = n_session.execute(
-            "SELECT id FROM neutron.lbaas_loadbalancers WHERE "
+            "SELECT id FROM lbaas_loadbalancers WHERE "
             "project_id = :id AND provisioning_status = 'ACTIVE';",
             {'id': CONF.project_id}).fetchall()
+    elif CONF.agent_id:
+        lb_id_list = n_session.execute(
+            "SELECT loadbalancer_id FROM lbaas_loadbalanceragentbindings WHERE "
+            "agent_id = :id",
+            {'id': CONF.agent_id}).fetchall()
     else:  # CONF.ALL
         lb_id_list = n_session.execute(
-            "SELECT id FROM neutron.lbaas_loadbalancers WHERE "
+            "SELECT id FROM lbaas_loadbalancers WHERE "
             "provisioning_status = 'ACTIVE';").fetchall()
 
     failure_count = 0
@@ -610,6 +733,7 @@ def main():
                                     o_session_maker, lb[0])
     if failure_count:
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
