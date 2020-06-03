@@ -314,9 +314,21 @@ class LoadBalancerProxyPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2):
         return self._get_resource(HEALTH_MONITOR, context, id, fields)
 
     def create_healthmonitor(self, context, healthmonitor):
+        if 'healthmonitor' in healthmonitor:
+            hm = healthmonitor['healthmonitor']
+            if hm.get('type') not in [constants.HEALTH_MONITOR_HTTP, constants.HEALTH_MONITOR_HTTPS]:
+                hm.pop('http_method', None)
+                hm.pop('expected_codes', None)
+                hm.pop('url_path', None)
         return self._create_resource(HEALTH_MONITOR, context, healthmonitor)
 
     def update_healthmonitor(self, context, id, healthmonitor):
+        if 'healthmonitor' in healthmonitor:
+            hm = healthmonitor['healthmonitor']
+            if hm.get('type') not in [constants.HEALTH_MONITOR_HTTP, constants.HEALTH_MONITOR_HTTPS]:
+                hm.pop('http_method', None)
+                hm.pop('expected_codes', None)
+                hm.pop('url_path', None)
         return self._update_resource(HEALTH_MONITOR, context,
                                      id, healthmonitor)
 
