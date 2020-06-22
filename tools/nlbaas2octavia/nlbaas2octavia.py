@@ -28,6 +28,9 @@ _translators = i18n.TranslatorFactory(domain='nlbaas2octavia')
 # The primary translation function using the well-known name "_"
 _ = _translators.primary
 
+bigips = {}
+agents = {}
+
 CONF = cfg.CONF
 
 cli_opts = [
@@ -44,22 +47,26 @@ cli_opts = [
 ]
 
 migration_opts = [
-    cfg.BoolOpt('delete_after_migration', default=True,
+    cfg.BoolOpt('delete_after_migration', default=False,
                 help='Delete the load balancer records from neutron-lbaas'
                      ' after migration'),
     cfg.BoolOpt('trial_run', default=False,
                 help='Run without making changes.'),
-    cfg.StrOpt('octavia_account_id', required=True,
-               help='The keystone account ID Octavia is running under.'),
     cfg.StrOpt('neutron_db_connection',
                required=True,
                help='The neutron database connection string'),
     cfg.StrOpt('octavia_db_connection',
                required=True,
                help='The octavia database connection string'),
-    cfg.StrOpt('bigip_password',
+""" cfg.StrOpt('bigip_password',
                required=True,
                help='The bigip password'),
+    cfg.DictOpt('bigip_hosts',
+                required=True,
+                help='BigIP host <-> hostname association')
+    cfg.StrOpt('octavia_account_id', required=False,
+               help='The keystone account ID Octavia is running under.'),
+"""
 ]
 
 cfg.CONF.register_cli_opts(cli_opts)
@@ -79,13 +86,12 @@ def cleanup_vcmp(bigip, vcmp_guest):
     guest = bigip.tm.vcmp.guests.guest.load(name=vcmp_guest)
     vlans = [vlan for vlan in guest.vlans]
     for vlan_name in guest.vlans:
-        vlan = bigip.mgmt.tm.net.vlans.vlan.load(vlan_name)
+        vlan = bigip.tm.net.vlans.vlan.load(name=vlan_name.split('/')[2], partition='Common')
         if not vlan.name.startswith('net-') and not vlan.name.startswith('cc-'):
-            vlan.delete()
             vlans.remove(vlan_name)
-
-    guest.vlans = vlans
-    guest.update()
+            guest.vlans = vlans
+            guest.update()
+            vlan.delete()
 
 
 def cleanup_bigip(bigip):
@@ -101,10 +107,13 @@ def cleanup_bigip(bigip):
         bigip.tm.ltm.virtual_address_s,
         bigip.tm.ltm.policys,
         bigip.tm.ltm.pools,
+        bigip.tm.ltm.profile.client_ssls,
         bigip.tm.ltm.monitor.https,
         bigip.tm.ltm.monitor.https_s,
         bigip.tm.ltm.monitor.tcps,
         bigip.tm.ltm.monitor.gateway_icmps,
+        bigip.tm.ltm.monitor.externals,
+        bigip.tm.ltm.monitor.tcp_half_opens,
         bigip.tm.ltm.nodes,
         bigip.tm.ltm.snats,
         bigip.tm.ltm.snatpools,
@@ -116,6 +125,14 @@ def cleanup_bigip(bigip):
         [r.delete() for r in ltm_type.get_collection()
          if r.partition != 'Common']
 
+    for sslprofile in bigip.tm.ltm.profile.client_ssls.get_collection():
+        if sslprofile.raw['name'].startswith('Project_'):
+            sslprofile.delete()
+
+    for cert in bigip.tm.sys.file.ssl_certs.get_collection():
+        if cert.raw['name'].startswith('Project_'):
+            cert.delete()
+
     net_types = [
         bigip.tm.net.arps,
         bigip.tm.net.selfips,
@@ -124,13 +141,25 @@ def cleanup_bigip(bigip):
     ]
     try:
         for net_type in net_types:
-            [r.delete() for r in net_type.get_collection()]
+            [r.delete() for r in net_type.get_collection()
+             if not r.name.startswith('cc') and not r.name == '0']
     except exceptions.iControlUnexpectedHTTPError:
         pass
 
+    print([folder.name for folder in bigip.tm.sys.folders.get_collection()])
     for folder in bigip.tm.sys.folders.get_collection():
-        if folder.name != '/' and folder.name != 'Common' and getattr(folder, 'partition', '') != 'Common':
+        if folder.name == '/' or folder.name == 'Common' or getattr(folder, 'partition', '') == 'Common':
+            continue
+        try:
             folder.delete()
+        except:
+            print("Deletion of {} failed".format(folder.name))
+            try:
+                draft = bigip.tm.sys.folders.folder.load(name='Drafts', partition=folder.name)
+                draft.delete()
+                folder.delete()
+            except:
+                pass
 
     for route in bigip.tm.net.routes.get_collection():
         route.delete()
@@ -221,7 +250,7 @@ def process_health_monitor(LOG, n_session, o_session, project_id,
         "SELECT type, delay, timeout, max_retries, http_method, url_path, "
         "expected_codes, admin_state_up, provisioning_status, name, "
         "max_retries_down FROM lbaas_healthmonitors WHERE id = :hm_id AND "
-        "provisioning_status = 'ACTIVE';", {'hm_id': hm_id}).fetchone()
+        "provisioning_status != 'DELETED';", {'hm_id': hm_id}).fetchone()
     LOG.debug('Migrating health manager: %s', hm_id)
 
     if hm is None:
@@ -326,7 +355,7 @@ def process_L7policies(LOG, n_session, o_session, listener_id, project_id):
         "redirect_pool_id, redirect_url, position, "
         "provisioning_status, admin_state_up FROM "
         "lbaas_l7policies WHERE listener_id = :listener_id AND "
-        "provisioning_status = 'ACTIVE';",
+        "provisioning_status != 'DELETED';",
         {'listener_id': listener_id}).fetchall()
     for l7policy in l7policies:
         LOG.debug('Migrating L7 policy: %s', l7policy[0])
@@ -360,9 +389,9 @@ def process_L7policies(LOG, n_session, o_session, listener_id, project_id):
                               'database.'))
         # Handle L7 rules
         if n_session.bind.name == 'postgresql':
-            query = "SELECT id, type, compare_type, invert, key, value, provisioning_status, admin_state_up FROM lbaas_l7rules WHERE l7policy_id = :l7policy_id AND provisioning_status = 'ACTIVE';"
+            query = "SELECT id, type, compare_type, invert, key, value, provisioning_status, admin_state_up FROM lbaas_l7rules WHERE l7policy_id = :l7policy_id AND provisioning_status != 'DELETED';"
         else:
-            query = "SELECT id, type, compare_type, invert, `key`, value, provisioning_status, admin_state_up FROM lbaas_l7rules WHERE l7policy_id = :l7policy_id AND provisioning_status = 'ACTIVE';"
+            query = "SELECT id, type, compare_type, invert, `key`, value, provisioning_status, admin_state_up FROM lbaas_l7rules WHERE l7policy_id = :l7policy_id AND provisioning_status != 'DELETED';"
         l7rules = n_session.execute(query,
                                     {'l7policy_id': l7policy[0]}).fetchall()
         for l7rule in l7rules:
@@ -405,8 +434,8 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
         # Lock the load balancer in neutron DB
         result = n_session.execute(
             "UPDATE lbaas_loadbalancers SET "
-            "provisioning_status = 'PENDING_UPDATE' WHERE id = :id AND "
-            "provisioning_status = 'ACTIVE';", {'id': lb_id})
+            "provisioning_status = 'PENDING_UPDATE' WHERE id = :id",
+            {'id': lb_id})
         if result.rowcount != 1:
             raise Exception(_('Load balancer is not provisioning_status '
                               'ACTIVE'))
@@ -415,9 +444,13 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
         n_lb = n_session.execute(
             "SELECT b.provider_name, a.project_id, a.name, a.description, "
             "a.admin_state_up, a.operating_status, a.flavor_id, "
-            "a.vip_port_id, a.vip_subnet_id, a.vip_address "
-            "FROM lbaas_loadbalancers a JOIN providerresourceassociations b "
-            "ON a.id = b.resource_id WHERE ID = :id;",
+            "a.vip_port_id, a.vip_subnet_id, a.vip_address, c.agent_id "
+            "FROM lbaas_loadbalancers a "
+            "JOIN providerresourceassociations b "
+            "ON a.id = b.resource_id "
+            "JOIN lbaas_loadbalanceragentbindings c "
+            "ON a.id = c.loadbalancer_id "
+            "WHERE ID = :id;",
             {'id': lb_id}).fetchone()
 
         # F5 lbaas specifics
@@ -434,6 +467,8 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
             {'id': n_lb[7]}).fetchone()
 
         # F5 lbaas specifics
+        # No need to migrate ports, new f5 ml2 plugin can handle old ports
+        """
         if vip_port[0] == 'network:f5lbaasv2':
             result = n_session.execute(
                 "UPDATE ports SET device_owner = 'network:f5listener' WHERE "
@@ -445,26 +480,43 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
             selfip_ports = n_session.execute(
                 "SELECT a.id, a.device_owner, a.project_id, b.host, "
                 "a.device_id, a.name, a.standard_attr_id FROM ports a JOIN ml2_port_bindings b ON "
-                "a.id = b.port_id  WHERE device_id = :device_id AND "
-                "host = :host AND device_owner = 'network:f5lbaasv2';",
-                {'device_id': n_lb[8], 'host': vip_port[2]}).fetchall()
+                "a.id = b.port_id  WHERE name in :names AND device_owner = 'network:f5lbaasv2';",
+                {'names': ['local-{}-{}'.format(hostname, n_lb[8]) for hostname in CONF.migration.bigip_hosts]}).fetchall()
 
-            LOG.info("Found %d selfips", len(selfip_ports))
+
+            if len(selfip_ports) < 2:
+                LOG.error("Found %d selfips", len(selfip_ports))
+            else:
+                LOG.info("Found %d selfips", len(selfip_ports))
+
+            for selfip in selfip_ports:
+                LOG.warning("{}, {}".format(selfip[3], selfip[4]))
 
             for selfip in selfip_ports:
                 p = re.compile('local-(.*)-{}'.format(n_lb[8]), re.IGNORECASE)
                 match = p.match(selfip[5])
                 if match:
-                    bigip = ManagementRoot(match.group(1), "admin", CONF.migration.bigip_password)
+                    def is_bigip_active(host):
+                        global bigips
 
-                    act = bigip.tm.cm.devices.device.load(
-                        name=get_device_name(bigip), partition='Common')
-                    active = act.failoverState.lower() == 'active'
+                        if host not in bigips:
+                            bigip = ManagementRoot(host, "admin", CONF.migration.bigip_password)
+
+                            act = bigip.tm.cm.devices.device.load(
+                                name=get_device_name(bigip), partition='Common')
+
+                            bigips[host] = act.failoverState.lower() == 'active'
+                        return bigips[host]
 
                     # Only migrate passive selfips
-                    if not active:
-                        LOG.info("Migrating selfip of passive device {}: {}".format(
-                            match.group(1), act.failoverState.lower()))
+                    # TODO!!!!1111111
+                    #if not is_bigip_active(match.group(1)):
+                    if True:
+                        if selfip[3] != CONF.migration.bigip_hosts[match.group(1)]:
+                            raise Exception(_('Wrong host for VIP'))
+
+                        LOG.info("Migrating selfip of passive device {}".format(
+                            match.group(1)))
                         result = n_session.execute(
                             "UPDATE ports SET device_owner = 'network:f5selfip', "
                             "device_id = :dev_id, project_id = :proj_id WHERE "
@@ -481,6 +533,21 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                         if result.rowcount != 1:
                             raise Exception(_('Unable to update SELFIP port in the neutron '
                                               'database.'))
+        """
+        def get_agent_host(agent):
+            global agents
+
+            if agent not in agents:
+                n_agent = n_session.execute(
+                    "SELECT agent_type, host FROM agents "
+                    "WHERE id = :id;",
+                    {'id': agent}).fetchone()
+
+                LOG.debug("Found agent '%s' at host '%s'",
+                          n_agent[0], n_agent[1])
+                agents[agent] = n_agent[1]
+
+            return agents[agent]
 
         # Octavia driver load balancers are now done, next process the other
         # provider driver load balancers
@@ -489,16 +556,17 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
             result = o_session.execute(
                 "INSERT INTO load_balancer (id, project_id, name, "
                 "description, provisioning_status, operating_status, enabled, "
-                "created_at, updated_at, provider) VALUES (:id, :project_id, "
+                "created_at, updated_at, provider, server_group_id) "
+                "VALUES (:id, :project_id, "
                 ":name, :description, :provisioning_status, "
                 ":operating_status, :enabled, :created_at, :updated_at, "
-                ":provider);",
+                ":provider, :server_group_id);",
                 {'id': lb_id, 'project_id': n_lb[1], 'name': n_lb[2],
                  'description': n_lb[3], 'provisioning_status': 'PENDING_UPDATE',
                  'operating_status': n_lb[5], 'enabled': n_lb[4],
                  'created_at': datetime.datetime.utcnow(),
                  'updated_at': datetime.datetime.utcnow(),
-                 'provider': 'f5'})
+                 'provider': 'f5', 'server_group_id': get_agent_host(n_lb[10])})
             if result.rowcount != 1:
                 raise Exception(_('Unable to create load balancer in the '
                                   'Octavia database.'))
@@ -674,16 +742,16 @@ def main():
     LOG = logging.getLogger('nlbaas2octavia')
     CONF.log_opt_values(LOG, logging.DEBUG)
 
-    if (CONF.cleanup_vcmp_guest and not CONF.cleanup_vcmp_host) or (
-            not CONF.cleanup_vcmp_guest and CONF.cleanup_vcmp_host):
-        print('Error: both --cleanup_vcmp_guest and --cleanup_vcmp_host must be specified.')
-        return 1
+    #if (CONF.cleanup_vcmp_guest and not CONF.cleanup_vcmp_host) or (
+    #        not CONF.cleanup_vcmp_guest and CONF.cleanup_vcmp_host):
+    #    print('Error: both --cleanup_vcmp_guest and --cleanup_vcmp_host must be specified.')
+    #    return 1
 
-    if CONF.cleanup_vcmp_guest and CONF.cleanup_vcmp_host:
+    if CONF.cleanup_vcmp_guest: # and CONF.cleanup_vcmp_host:
         guest = ManagementRoot(CONF.cleanup_vcmp_guest, "admin", CONF.migration.bigip_password)
-        vcmp = ManagementRoot(CONF.cleanup_vcmp_host, "admin", CONF.migration.bigip_password)
+        #vcmp = ManagementRoot(CONF.cleanup_vcmp_host, "admin", CONF.migration.bigip_password)
         cleanup_bigip(guest)
-        cleanup_vcmp(vcmp, CONF.cleanup_vcmp_guest)
+        #cleanup_vcmp(vcmp, CONF.cleanup_vcmp_guest)
         return 0
 
     if not CONF.all and not CONF.lb_id and not CONF.project_id and not CONF.agent_id:
@@ -715,7 +783,7 @@ def main():
     elif CONF.project_id:
         lb_id_list = n_session.execute(
             "SELECT id FROM lbaas_loadbalancers WHERE "
-            "project_id = :id AND provisioning_status = 'ACTIVE';",
+            "project_id = :id AND provisioning_status != 'DELETED';",
             {'id': CONF.project_id}).fetchall()
     elif CONF.agent_id:
         lb_id_list = n_session.execute(
@@ -725,7 +793,7 @@ def main():
     else:  # CONF.ALL
         lb_id_list = n_session.execute(
             "SELECT id FROM lbaas_loadbalancers WHERE "
-            "provisioning_status = 'ACTIVE';").fetchall()
+            "provisioning_status != 'DELETED';").fetchall()
 
     failure_count = 0
     for lb in lb_id_list:
