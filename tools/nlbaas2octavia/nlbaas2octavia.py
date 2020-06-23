@@ -58,15 +58,8 @@ migration_opts = [
     cfg.StrOpt('octavia_db_connection',
                required=True,
                help='The octavia database connection string'),
-""" cfg.StrOpt('bigip_password',
-               required=True,
+    cfg.StrOpt('bigip_password',
                help='The bigip password'),
-    cfg.DictOpt('bigip_hosts',
-                required=True,
-                help='BigIP host <-> hostname association')
-    cfg.StrOpt('octavia_account_id', required=False,
-               help='The keystone account ID Octavia is running under.'),
-"""
 ]
 
 cfg.CONF.register_cli_opts(cli_opts)
