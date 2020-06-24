@@ -336,10 +336,20 @@ class LoadBalancerProxyPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2):
         return self._delete_resource(HEALTH_MONITOR, context, id)
 
     def get_members(self, context, filters=None, fields=None):
-        pass
+        # Used by quota plugin
+        pools = self.get_pools(context, filters, fields='id')
+        members = []
+        for pool in pools:
+            members += self.get_pool_members(context, pool['id'], filters, fields)
+        return members
 
     def get_member(self, context, id, fields=None):
-        pass
+        pools = self.get_pools(context, fields='id')
+        for pool in pools:
+            member = self.get_pool_member(context, id, pool['id'], fields)
+            if member:
+                return member
+        return None
 
     def statuses(self, context, loadbalancer_id):
         return self._get_resources(LOADBALANCER, context, sub_resource=STATUS,
