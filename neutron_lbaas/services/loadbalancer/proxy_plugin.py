@@ -31,7 +31,7 @@ OCTAVIA_PROXY_CLIENT = (
     "LBaaS V2 Octavia Proxy/{version} "
     "(https://wiki.openstack.org/wiki/Octavia)").format(version=VERSION)
 FILTER = ['vip_address', 'vip_network_id', 'flavor_id',
-          'provider', 'redirect_pool_id']
+          'provider']
 
 LOADBALANCER = 'loadbalancer'
 LISTENER = 'listener'
