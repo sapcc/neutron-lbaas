@@ -19,6 +19,7 @@ from oslo_config import cfg
 from oslo_db.sqlalchemy import enginefacade
 import oslo_i18n as i18n
 from oslo_log import log as logging
+from f5.bigip import ManagementRoot
 
 _translators = i18n.TranslatorFactory(domain='nlbaas2octavia')
 
@@ -31,6 +32,8 @@ agents = {}
 CONF = cfg.CONF
 
 cli_opts = [
+    cfg.StrOpt('cleanup_vcmp_guest', help='Cleanup the BigIP guest if status == passive/offline'),
+    cfg.StrOpt('cleanup_vcmp_host', help='Cleanup the BigIP host vlans of the vcmp_guest'),
     cfg.BoolOpt('all', default=False,
                 help='Migrate all load balancers'),
     cfg.StrOpt('lb_id',
@@ -53,10 +56,104 @@ migration_opts = [
     cfg.StrOpt('octavia_db_connection',
                required=True,
                help='The octavia database connection string'),
+    cfg.StrOpt('bigip_password',
+               help='The bigip password'),
 ]
 
 cfg.CONF.register_cli_opts(cli_opts)
 cfg.CONF.register_opts(migration_opts, group='migration')
+
+
+def get_device_name(bigip):
+    devices = bigip.tm.cm.devices.get_collection()
+    for device in devices:
+        if device.selfDevice == 'true':
+            return device.name
+
+    return None
+
+
+def cleanup_vcmp(bigip, vcmp_guest):
+    guest = bigip.tm.vcmp.guests.guest.load(name=vcmp_guest)
+    vlans = [vlan for vlan in guest.vlans]
+    for vlan_name in guest.vlans:
+        vlan = bigip.tm.net.vlans.vlan.load(name=vlan_name.split('/')[2], partition='Common')
+        if not vlan.name.startswith('net-') and not vlan.name.startswith('cc-'):
+            vlans.remove(vlan_name)
+            guest.vlans = vlans
+            guest.update()
+            vlan.delete()
+
+
+def cleanup_bigip(bigip):
+    act = bigip.tm.cm.devices.device.load(
+        name=get_device_name(bigip), partition='Common')
+    active = act.failoverState.lower() == 'active'
+
+    if active:
+        raise Exception(_('BigIP is active, aborting cleanup'))
+
+    ltm_types = [
+        bigip.tm.ltm.virtuals,
+        bigip.tm.ltm.virtual_address_s,
+        bigip.tm.ltm.policys,
+        bigip.tm.ltm.pools,
+        bigip.tm.ltm.profile.client_ssls,
+        bigip.tm.ltm.profile.server_ssls,
+        bigip.tm.ltm.monitor.https,
+        bigip.tm.ltm.monitor.https_s,
+        bigip.tm.ltm.monitor.tcps,
+        bigip.tm.ltm.monitor.gateway_icmps,
+        bigip.tm.ltm.monitor.externals,
+        bigip.tm.ltm.monitor.tcp_half_opens,
+        bigip.tm.ltm.nodes,
+        bigip.tm.ltm.snats,
+        bigip.tm.ltm.snatpools,
+        bigip.tm.ltm.snat_translations,
+        bigip.tm.ltm.persistence.universals,
+        bigip.tm.ltm.rules
+    ]
+    for ltm_type in ltm_types:
+        [r.delete() for r in ltm_type.get_collection()
+         if r.partition != 'Common']
+
+    for sslprofile in bigip.tm.ltm.profile.client_ssls.get_collection():
+        if sslprofile.raw['name'].startswith('Project_'):
+            sslprofile.delete()
+
+    for cert in bigip.tm.sys.file.ssl_certs.get_collection():
+        if cert.raw['name'].startswith('Project_'):
+            cert.delete()
+
+    print([folder.name for folder in bigip.tm.sys.folders.get_collection()])
+    for folder in bigip.tm.sys.folders.get_collection():
+        if folder.name == '/' or folder.name == 'Common' or getattr(folder, 'partition', '') == 'Common':
+            continue
+        try:
+            folder.delete()
+        except:
+            print("Deletion of {} failed".format(folder.name))
+            try:
+                draft = bigip.tm.sys.folders.folder.load(name='Drafts', partition=folder.name)
+                draft.delete()
+                folder.delete()
+            except:
+                pass
+
+    for route in bigip.tm.net.routes.get_collection():
+        route.delete()
+
+    for selfip in bigip.tm.net.selfips.get_collection():
+        if not selfip.name.startswith('cc'):
+            selfip.delete()
+
+    for route_domain in bigip.tm.net.route_domains.get_collection():
+        if route_domain.id != 0:
+            route_domain.delete()
+
+    for vlan in bigip.tm.net.vlans.get_collection():
+        if not vlan.name.startswith('cc'):
+            vlan.delete()
 
 
 def cascade_delete_neutron_lb(n_session, lb_id):
@@ -323,6 +420,15 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
             LOG.warning("load balancer exists, skiping: %s", lb_id)
             return 0
 
+        # Lock the load balancer in neutron DB
+        #result = n_session.execute(
+        #    "UPDATE lbaas_loadbalancers SET "
+        #    "provisioning_status = 'PENDING_UPDATE' WHERE id = :id",
+        #    {'id': lb_id})
+        #if result.rowcount != 1:
+        #    raise Exception(_('Load balancer is not provisioning_status '
+        #                      'ACTIVE'))
+
         # Get the load balancer record from neutron
         n_lb = n_session.execute(
             "SELECT b.provider_name, a.project_id, a.name, a.description, "
@@ -342,6 +448,81 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                 lb_id, n_lb[0]
             )))
 
+        # Migrate the port and security groups to Octavia
+        #vip_port = n_session.execute(
+        #    "SELECT a.device_owner, a.project_id, b.host "
+        #    "FROM ports a JOIN ml2_port_bindings b ON "
+        #    "a.id = b.port_id  where id = :id;",
+        #    {'id': n_lb[7]}).fetchone()
+
+        # F5 lbaas specifics
+        # No need to migrate ports, new f5 ml2 plugin can handle old ports
+        """
+        if vip_port[0] == 'network:f5lbaasv2':
+            result = n_session.execute(
+                "UPDATE ports SET device_owner = 'network:f5listener' WHERE "
+                "id = :id;", {'id': n_lb[7]})
+            if result.rowcount != 1:
+                raise Exception(_('Unable to update VIP port in the neutron '
+                                  'database.'))
+
+            selfip_ports = n_session.execute(
+                "SELECT a.id, a.device_owner, a.project_id, b.host, "
+                "a.device_id, a.name, a.standard_attr_id FROM ports a JOIN ml2_port_bindings b ON "
+                "a.id = b.port_id  WHERE name in :names AND device_owner = 'network:f5lbaasv2';",
+                {'names': ['local-{}-{}'.format(hostname, n_lb[8]) for hostname in CONF.migration.bigip_hosts]}).fetchall()
+
+
+            if len(selfip_ports) < 2:
+                LOG.error("Found %d selfips", len(selfip_ports))
+            else:
+                LOG.info("Found %d selfips", len(selfip_ports))
+
+            for selfip in selfip_ports:
+                LOG.warning("{}, {}".format(selfip[3], selfip[4]))
+
+            for selfip in selfip_ports:
+                p = re.compile('local-(.*)-{}'.format(n_lb[8]), re.IGNORECASE)
+                match = p.match(selfip[5])
+                if match:
+                    def is_bigip_active(host):
+                        global bigips
+
+                        if host not in bigips:
+                            bigip = ManagementRoot(host, "admin", CONF.migration.bigip_password)
+
+                            act = bigip.tm.cm.devices.device.load(
+                                name=get_device_name(bigip), partition='Common')
+
+                            bigips[host] = act.failoverState.lower() == 'active'
+                        return bigips[host]
+
+                    # Only migrate passive selfips
+                    # TODO!!!!1111111
+                    #if not is_bigip_active(match.group(1)):
+                    if True:
+                        if selfip[3] != CONF.migration.bigip_hosts[match.group(1)]:
+                            raise Exception(_('Wrong host for VIP'))
+
+                        LOG.info("Migrating selfip of passive device {}".format(
+                            match.group(1)))
+                        result = n_session.execute(
+                            "UPDATE ports SET device_owner = 'network:f5selfip', "
+                            "device_id = :dev_id, project_id = :proj_id WHERE "
+                            "id = :id;", {'id': selfip[0],
+                                          'dev_id': n_lb[7],
+                                          'proj_id': CONF.migration.octavia_account_id})
+                        if result.rowcount != 1:
+                            raise Exception(_('Unable to update SELFIP port in the neutron '
+                                              'database.'))
+                        result = n_session.execute(
+                            "UPDATE standardattributes SET description = :desc "
+                            "WHERE id = :id;", {'id': selfip[6],
+                                                'desc': match.group(1)})
+                        if result.rowcount != 1:
+                            raise Exception(_('Unable to update SELFIP port in the neutron '
+                                              'database.'))
+        """
         def get_agent_host(agent):
             global agents
 
@@ -459,7 +640,8 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                 if listener[8] == 'DELETED':
                     continue
                 elif listener[8] not in ['ACTIVE', 'PENDING_DELETE', 'PENDING_CREATE', 'PENDING_UPDATE']:
-                    raise Exception(_('Listener is invalid state of {}.'.format(listener[8])))
+                    raise Exception(_('Listener is invalid state of %s.'),
+                                    listener[8])
 
                 result = o_session.execute(
                     "INSERT INTO listener (id, project_id, name, description, "
@@ -549,6 +731,18 @@ def main():
     LOG = logging.getLogger('nlbaas2octavia')
     CONF.log_opt_values(LOG, logging.DEBUG)
 
+    #if (CONF.cleanup_vcmp_guest and not CONF.cleanup_vcmp_host) or (
+    #        not CONF.cleanup_vcmp_guest and CONF.cleanup_vcmp_host):
+    #    print('Error: both --cleanup_vcmp_guest and --cleanup_vcmp_host must be specified.')
+    #    return 1
+
+    if CONF.cleanup_vcmp_guest: # and CONF.cleanup_vcmp_host:
+        guest = ManagementRoot(CONF.cleanup_vcmp_guest, "admin", CONF.migration.bigip_password)
+        #vcmp = ManagementRoot(CONF.cleanup_vcmp_host, "admin", CONF.migration.bigip_password)
+        cleanup_bigip(guest)
+        #cleanup_vcmp(vcmp, CONF.cleanup_vcmp_guest)
+        return 0
+
     if not CONF.all and not CONF.lb_id and not CONF.project_id and not CONF.agent_id:
         print('Error: One of --all, --lb_id, --project_id, --agent_id must be specified.')
         return 1
@@ -571,6 +765,7 @@ def main():
     LOG.info('Starting migration.')
 
     n_session = n_session_maker(autocommit=True)
+    lb_id_list = []
 
     if CONF.lb_id:
         lb_id_list = [[CONF.lb_id]]
@@ -595,12 +790,6 @@ def main():
                                     o_session_maker, lb[0])
     if failure_count:
         sys.exit(1)
-
-    if not CONF.migration.trial_run:
-        # Remove lbaas_loadbalancer foreign key, else ports cannot be deleted anymore
-        n_session.execute(
-            "ALTER TABLE lbaas_loadbalancers DROP "
-            "FOREIGN KEY fk_lbaas_loadbalancers_ports_id;")
 
 
 if __name__ == "__main__":
