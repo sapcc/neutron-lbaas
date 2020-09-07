@@ -190,11 +190,6 @@ def process_members(LOG, n_session, o_session, project_id, pool_id):
 
         if member[6] == 'DELETED':
             continue
-        elif member[6] not in ['ACTIVE', 'PENDING_DELETE', 'PENDING_CREATE', 'PENDING_UPDATE']:
-            raise Exception(_('Member %s for pool %s is invalid state of %s.'),
-                            member[0],
-                            pool_id,
-                            member[6])
 
         result = o_session.execute(
             "INSERT INTO member (id, pool_id, project_id, subnet_id, "
@@ -244,9 +239,6 @@ def process_L7policies(LOG, n_session, o_session, listener_id, project_id):
 
         if l7policy[8] == 'DELETED':
             continue
-        elif l7policy[8] not in ['ACTIVE', 'PENDING_DELETE', 'PENDING_CREATE', 'PENDING_UPDATE']:
-            raise Exception(_('L7 policy is invalid state of %s.'),
-                            l7policy[8])
 
         L7p_op_status = 'ONLINE' if l7policy[9] else 'OFFLINE'
 
@@ -281,9 +273,6 @@ def process_L7policies(LOG, n_session, o_session, listener_id, project_id):
 
             if l7rule[6] == 'DELETED':
                 continue
-            elif l7rule[6] not in ['ACTIVE', 'PENDING_DELETE', 'PENDING_CREATE', 'PENDING_UPDATE']:
-                raise Exception(_('L7 rule is invalid state of %s.'),
-                                l7rule[6])
 
             L7r_op_status = 'ONLINE' if l7rule[7] else 'OFFLINE'
 
@@ -407,8 +396,6 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
 
                 if pool[7] == 'DELETED':
                     continue
-                elif pool[7] not in ['ACTIVE', 'PENDING_DELETE', 'PENDING_CREATE', 'PENDING_UPDATE']:
-                    raise Exception(_('Pool is invalid state of %s.'), pool[7])
 
                 result = o_session.execute(
                     "INSERT INTO pool (id, project_id, name, description, "
@@ -458,8 +445,12 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
 
                 if listener[8] == 'DELETED':
                     continue
-                elif listener[8] not in ['ACTIVE', 'PENDING_DELETE', 'PENDING_CREATE', 'PENDING_UPDATE']:
-                    raise Exception(_('Listener is invalid state of {}.'.format(listener[8])))
+
+                # Reset prov status error
+                if listener[8] == 'ERROR':
+                    prov_status = 'PENDING_UPDATE'
+                else:
+                    prov_status = listener[8]
 
                 result = o_session.execute(
                     "INSERT INTO listener (id, project_id, name, description, "
@@ -479,7 +470,7 @@ def migrate_lb(LOG, n_session_maker, o_session_maker, lb_id):
                      'load_balancer_id': lb_id,
                      'tls_certificate_id': listener[10],
                      'default_pool_id': listener[6],
-                     'provisioning_status': listener[8],
+                     'provisioning_status': prov_status,
                      'operating_status': listener[9], 'enabled': listener[7],
                      'created_at': datetime.datetime.utcnow(),
                      'updated_at': datetime.datetime.utcnow()})
@@ -600,7 +591,7 @@ def main():
         # Remove lbaas_loadbalancer foreign key, else ports cannot be deleted anymore
         n_session.execute(
             "ALTER TABLE lbaas_loadbalancers DROP "
-            "FOREIGN KEY fk_lbaas_loadbalancers_ports_id;")
+            "FOREIGN KEY IF EXISTS fk_lbaas_loadbalancers_ports_id;")
 
 
 if __name__ == "__main__":
