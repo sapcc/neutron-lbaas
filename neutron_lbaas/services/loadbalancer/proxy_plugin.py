@@ -17,6 +17,7 @@ import functools
 from neutron.db import servicetype_db as st_db
 from neutron.services import provider_configuration as pconf
 from neutron_lib import exceptions as lib_exc
+from neutron_lib import constants as n_const
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
@@ -167,7 +168,8 @@ class LoadBalancerProxyPluginv2(loadbalancerv2.LoadBalancerPluginBaseV2):
         res = {}
         for k in map:
             if k not in keys:
-                if map[k]:
+                # remove sentinels that are injected by neutron-api as UNSET values
+                if map[k] and not isinstance(map[k], n_const.Sentinel):
                     res[k] = map[k]
         if 'tenant_id' in res:
             res['project_id'] = res.pop('tenant_id')

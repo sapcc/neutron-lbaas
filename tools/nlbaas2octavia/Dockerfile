@@ -1,4 +1,5 @@
 FROM python:3
+LABEL source_repository=https://github.com/sapcc/neutron-lbaas
 
 WORKDIR /usr/src/app
 
